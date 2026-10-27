@@ -63,7 +63,7 @@ struct HrPacket {
 };
 HrPacket lastHrPacket();
 
-void begin();
+bool begin();
 void task(void* arg);
 
 // Fills KIND_COUNT entries, one per kind, in Kind order.

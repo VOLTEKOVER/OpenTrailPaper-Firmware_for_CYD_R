@@ -35,6 +35,12 @@
 #include "memfault_service.h"
 
 static TaskHandle_t g_uiTask = nullptr;   // for the stack high-water log
+#ifdef BOARD_CYD
+static constexpr uint32_t kUiStackBytes = 8192;
+#else
+static constexpr uint32_t kUiStackBytes = 12288;
+#endif
+static uint32_t gUiStackBytes = kUiStackBytes;
 #include <esp_sleep.h>
 #include <driver/gpio.h>
 #include <soc/rtc_cntl_reg.h>
@@ -351,10 +357,12 @@ void setup() {
     // hands-free flashing work; this is the belt-and-braces for every other way
     // the bit could still be set by the time we get here. Logged when found set,
     // since on a healthy boot it should always read 0.
+#ifndef BOARD_CYD
     if (REG_READ(RTC_CNTL_OPTION1_REG) & RTC_CNTL_FORCE_DOWNLOAD_BOOT) {
         REG_CLR_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
         diag::log("cleared a stale force-download-boot bit");
     }
+#endif
     if (rr == ESP_RST_DEEPSLEEP) {
         esp_sleep_wakeup_cause_t wc = esp_sleep_get_wakeup_cause();
         diag::log("woke by: %s [%d]", wakeCauseStr(wc), (int)wc);
@@ -372,6 +380,7 @@ void setup() {
     g_i2cMutex = xSemaphoreCreateMutex();   // guard the shared I2C bus
     g_sdMutex = xSemaphoreCreateRecursiveMutex();  // guard the shared SD bus
     power_mgmt::prepare();
+#ifndef BOARD_CYD
     Wire.begin(BOARD_SDA, BOARD_SCL);
 
     // GPS (and LoRa) 3V3 rail is gated by the IO expander.
@@ -385,8 +394,12 @@ void setup() {
     } else {
         Serial.println("[main] IO expander not found — GPS may be unpowered");
     }
+#else
+    diag::log("CYD: skipping T5S3 I2C expander, charger, and fuel gauge");
+#endif
     pinMode(BOARD_BOOT_BTN, INPUT_PULLUP);
 
+#ifndef BOARD_CYD
     fuelGaugeOk = fuelGauge.init();
     // init() failing kills the battery display for the whole session, so record
     // it — with the device number, which separates "wrong/absent chip" (anything
@@ -421,6 +434,7 @@ void setup() {
                       raw, tries);
         }
     }
+#endif
     settings::begin();
     g_state.with([](RideState& s) {
         s.ftpW = (uint16_t)settings::ftpWatts();
@@ -435,6 +449,13 @@ void setup() {
     // gets anywhere. beginPanel() touches only the display, touch and input
     // interrupts; the map load stays in begin() below because it needs the SD.
     bool uiOk = ui_dashboard::beginPanel();
+
+#ifdef BOARD_CYD
+    // The CYD has no PSRAM, and SD/FAT plus map startup consume a substantial
+    // part of its internal heap. Initialize the BLE controller before mounting
+    // the card so its DMA-capable allocations get first use of the heap.
+    const bool bleOk = ble_sensors::begin();
+#endif
 
     // Announced first: the mount can take a couple of seconds on a cold card,
     // and until this repaint landed the glass sat on "Display" with nothing to
@@ -465,6 +486,11 @@ void setup() {
     // factory it can hold LOCAL time (observed 8 h off UTC), and seeding a
     // grossly wrong time into the receiver hurts acquisition rather than helps.
     ui_dashboard::bootStep("RTC");
+#ifdef BOARD_CYD
+    ui_dashboard::bootDetailFor("RTC", "not fitted");
+    ui_dashboard::bootStatus("RTC", false);
+    diag::log("rtc: skipped on CYD (no external RTC)");
+#else
     if (rtc_clock::begin()) {
 
         time_t rt;
@@ -486,6 +512,7 @@ void setup() {
         ui_dashboard::bootStatus("RTC", false);
         diag::log("rtc: not found");
     }
+#endif
     // NOTE: usb_storage::begin() is called from the UI task AFTER the boot-time
     // SD firmware-update check, so a firmware.bin dropped on the card always
     // flashes before the computer can mount (and grab) the SD.
@@ -500,6 +527,12 @@ void setup() {
     // true and were not earlier: the shared 3V3 rail (raised with the GPS above)
     // and the SPI bus (opened by ride_recorder::begin()).
     ui_dashboard::bootStep("Mesh");
+#ifdef BOARD_CYD
+    const bool meshOk = false;
+    ui_dashboard::bootDetailFor("Mesh", "LoRa not fitted");
+    ui_dashboard::bootStatus("Mesh", false);
+    diag::log("mesh: skipped on CYD (no SX1262 radio or T5S3 power expander)");
+#else
     const bool meshOk = mesh_service::begin();
     if (!mesh_service::enabled())
         ui_dashboard::bootDetailFor("Mesh", "off in settings");
@@ -520,6 +553,7 @@ void setup() {
     // Switched off is not a failure, so that case still gets a tick.
     ui_dashboard::bootStatus("Mesh",
                              mesh_service::radioOk() || !mesh_service::enabled());
+#endif
 
     // Optional Qwiic sensors, probed HERE — inside the window where the boot
     // screen is live.
@@ -529,7 +563,12 @@ void setup() {
     // was a silent no-op: the lines existed in the code and never once reached
     // the glass. Sitting ahead of the map index (the longest step of a boot)
     // also means they stay readable for a few seconds rather than flashing past.
+ #ifdef BOARD_CYD
+    const bool auxOk = false;
+    diag::log("aux sensors: skipped on CYD (I2C sensors not mapped)");
+#else
     const bool auxOk = aux_sensors::begin();
+#endif
     if (!auxOk) {
         // Nothing on the connector: ONE quiet line. Three "absent" rows on
         // every boot of every device that never had these fitted is noise, and
@@ -628,10 +667,20 @@ void setup() {
     // rail pins alone.
     if (ioExpanderOk) ioExpander.pinMode(IOEXP_PIN_SIDE_BUTTON, INPUT);
 
+#ifdef BOARD_CYD
+    BOOT_STEP("ui_dashboard done -> BLE server");
+#else
     BOOT_STEP("ui_dashboard done -> ble_sensors::begin()");
-    ble_sensors::begin();
-    BOOT_STEP("ble_sensors done -> ble_server::begin()");
-    ble_server::begin();   // GATT server for the iOS companion app
+#endif
+#ifndef BOARD_CYD
+    const bool bleOk = ble_sensors::begin();
+#endif
+    if (bleOk) {
+        BOOT_STEP("ble_sensors done -> ble_server::begin()");
+        ble_server::begin();   // GATT server for the iOS companion app
+    } else {
+        diag::log("ble: skipped server startup because NimBLE is unavailable");
+    }
 
     BOOT_STEP("ble_server done -> power_mgmt::begin()");
 
@@ -641,11 +690,46 @@ void setup() {
     workout_service::begin();   // picker cache locks, before any task runs
     BOOT_STEP("power_mgmt done -> creating tasks");
 
+    // The CYD has no PSRAM, so reserve the display task stack before other
+    // workers fragment the remaining internal heap. The boot log remains on
+    // screen until this task actually starts.
+    // BLE and the SD/map startup consume most of the CYD's internal heap.
+    // Keep its UI stack within the contiguous block left after those services
+    // initialize; a 12 KB request failed with about 13 KB largest free.
+    uint32_t uiStackBytes = kUiStackBytes;
+    BaseType_t uiTaskResult = xTaskCreatePinnedToCore(
+        ui_dashboard::task, "ui", uiStackBytes, nullptr, 2, &g_uiTask, 1);
+#ifdef BOARD_CYD
+    for (uint32_t retryStack = 6144;
+         uiTaskResult != pdPASS && retryStack >= 4096;
+         retryStack -= 2048) {
+        diag::log("ui: retrying task creation stack=%u internal=%u largest=%u",
+                  (unsigned)retryStack,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        uiStackBytes = retryStack;
+        uiTaskResult = xTaskCreatePinnedToCore(
+            ui_dashboard::task, "ui", uiStackBytes, nullptr, 2, &g_uiTask, 1);
+    }
+#endif
+    gUiStackBytes = uiStackBytes;
+    if (uiTaskResult != pdPASS) {
+        g_uiTask = nullptr;
+        diag::log("ui: dashboard task creation FAILED stack=%u internal=%u largest=%u",
+                  (unsigned)uiStackBytes,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
+
     xTaskCreatePinnedToCore(gps_service::task, "gps", 4096, nullptr, 3, nullptr, 0);
-    xTaskCreatePinnedToCore(ble_sensors::task, "ble", 6144, nullptr, 2, nullptr, 0);
-    xTaskCreatePinnedToCore(ble_server::task, "srv", 4096, nullptr, 1, nullptr, 0);
+    if (bleOk) {
+        xTaskCreatePinnedToCore(ble_sensors::task, "ble", 6144, nullptr, 2, nullptr, 0);
+        xTaskCreatePinnedToCore(ble_server::task, "srv", 4096, nullptr, 1, nullptr, 0);
+    }
     xTaskCreatePinnedToCore(ride_recorder::task, "rec", 6144, nullptr, 3, nullptr, 1);
+#ifndef BOARD_CYD
     xTaskCreatePinnedToCore(batteryTask, "bat", 3072, nullptr, 1, nullptr, 1);
+#endif
     // No task at all when nothing is fitted — the whole feature costs an absent
     // device exactly one bus probe at boot.
     if (auxOk)
@@ -660,23 +744,25 @@ void setup() {
     if (meshOk)
         xTaskCreatePinnedToCore(mesh_service::task, "mesh", 6144, nullptr, 2,
                                 nullptr, 0);
-    // 12 KB: at 8 KB the boot path (applySdUpdate -> SD.exists -> FatFS ->
-    // SPI) ran to within 64 bytes of the end once the speed-sensor UI grew,
-    // and overflowed into a boot loop (Memfault dumps, Oct 2026). loop() logs
-    // the high-water mark so the margin is visible.
-    xTaskCreatePinnedToCore(ui_dashboard::task, "ui", 12288, nullptr, 2, &g_uiTask, 1);
-
-    diag::log("boot: all tasks started");
+    diag::log("boot: task startup complete");
     diag::finishBoot();
 }
 
 void loop() {
+    static bool startupRecoveryStarted = false;
+    if (g_uiTask && !startupRecoveryStarted) {
+        startupRecoveryStarted = true;
+        diag::log("boot: starting ride recovery on loop task");
+        ui_dashboard::recoverStartupRides();
+    }
+
     // Stack margin of the UI task, once after boot and then every 10 min.
     static uint32_t nextStackLog = 60000;
     if (g_uiTask && (int32_t)(millis() - nextStackLog) >= 0) {
         nextStackLog = millis() + 600000;
-        diag::log("stack: ui free=%u bytes (of 12288)",
-                  (unsigned)uxTaskGetStackHighWaterMark(g_uiTask));
+        diag::log("stack: ui free=%u bytes (of %u)",
+                  (unsigned)uxTaskGetStackHighWaterMark(g_uiTask),
+                  (unsigned)gUiStackBytes);
     }
     usb_storage::poll();   // reclaim the SD when the host disconnects
     ride_recorder::retryMountIfNeeded();   // pick a dropped card back up
@@ -698,15 +784,26 @@ void board_radio_power(bool on) {
 }
 
 bool board_read_power(uint16_t& mv, int16_t& ma) {
+#ifdef BOARD_CYD
+    (void)mv;
+    (void)ma;
+    return false;
+#else
     if (!fuelGaugeOk) return false;
     i2cLock();
     mv = fuelGauge.getVoltage();
     ma = fuelGauge.getCurrent();
     i2cUnlock();
     return true;
+#endif
 }
 
 bool board_gauge_report(char* out, size_t n) {
+#ifdef BOARD_CYD
+    (void)out;
+    (void)n;
+    return false;
+#else
     GaugeSnapshot g;
     gaugeRead(g);                      // read even when init() failed — the raw
     char detail[140];                  // registers are the evidence we want
@@ -715,6 +812,7 @@ bool board_gauge_report(char* out, size_t n) {
              (g.soc >= 1 && g.soc <= 100) ? "%" : "% (INVALID)", g.mv, g.ma,
              g.rc, g.fc, g.charging ? "charging" : "discharging", detail);
     return fuelGaugeOk;
+#endif
 }
 
 // TWO agreeing reads, not one — this is the only button whose state arrives
@@ -762,6 +860,10 @@ bool board_side_button_pressed() {
 // BQ25896 REG11 bit 7 is VBUS_GD, a live status bit independent of ADC mode.
 // Read only: do not reset/reconfigure the charger owned by the panel driver.
 bool board_usb_power_present(bool& present) {
+#ifdef BOARD_CYD
+    present = false;
+    return false;
+#else
     i2cLock();
     Wire.beginTransmission(0x6B);
     Wire.write(0x11);
@@ -770,4 +872,5 @@ bool board_usb_power_present(bool& present) {
     if (ok) present = (Wire.read() & 0x80) != 0;
     i2cUnlock();
     return ok;
+#endif
 }

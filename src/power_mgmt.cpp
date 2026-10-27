@@ -26,6 +26,12 @@ extern "C" bool board_ble_xtal_clock_ready();
 
 namespace power_mgmt {
 
+#ifdef BOARD_CYD
+using board_pm_config_t = esp_pm_config_esp32_t;
+#else
+using board_pm_config_t = esp_pm_config_esp32s3_t;
+#endif
+
 static esp_pm_lock_handle_t s_usbLock = nullptr;
 static esp_pm_lock_handle_t s_busyLock = nullptr;
 static esp_pm_lock_handle_t s_lightLock = nullptr;
@@ -69,7 +75,7 @@ static portMUX_TYPE s_busyMux = portMUX_INITIALIZER_UNLOCKED;
 bool prepare() {
     if (s_prepared) return s_usbLock && s_busyLock;
     s_prepared = true;
-    esp_pm_config_esp32s3_t awake = {};
+    board_pm_config_t awake = {};
     awake.max_freq_mhz = awake.min_freq_mhz = 240;
     esp_err_t err = esp_pm_configure(&awake);
     if (err != ESP_OK) {
@@ -96,15 +102,19 @@ bool prepare() {
               esp_get_idf_version(), __DATE__, __TIME__);
     // Ground truth for the interrupt-watchdog stretch (src/int_wdt_stretch.cpp):
     // stage 0 as the hardware holds it, in MWDT1's 500 us ticks.
+#ifdef BOARD_CYD
+    diag::log("pm: interrupt watchdog register diagnostics are unavailable on CYD");
+#else
     diag::log("pm: interrupt watchdog stage0=%u ticks (%u ms; framework default %d ms)",
               (unsigned)TIMERG1.wdtconfig2.wdt_stg0_hold,
               (unsigned)TIMERG1.wdtconfig2.wdt_stg0_hold / 2, CONFIG_ESP_INT_WDT_TIMEOUT_MS);
+#endif
     return true;
 }
 
 bool begin() {
     if (!prepare() || !s_usbHeld) return false;
-    esp_pm_config_esp32s3_t cfg = {};
+    board_pm_config_t cfg = {};
     cfg.max_freq_mhz = 240;
     cfg.min_freq_mhz = PM_MIN_CPU_MHZ;
     cfg.light_sleep_enable = s_sleepRequested.load();
@@ -188,7 +198,7 @@ static constexpr uint32_t USB_GRACE_MS = 30000;
 void tick() {
     if (!s_enabled) return;
     if (s_sleepRequested.load() != s_sleepConfigured.load()) {
-        esp_pm_config_esp32s3_t cfg = {};
+        board_pm_config_t cfg = {};
         cfg.max_freq_mhz = 240;
         cfg.min_freq_mhz = PM_MIN_CPU_MHZ;
         cfg.light_sleep_enable = s_sleepRequested.load();

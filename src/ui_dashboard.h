@@ -29,6 +29,10 @@ void bootStatus(const char* step, bool ok);
 // Load the map and finish UI bring-up. Needs the SD card, so it runs after it.
 bool begin();
 
+// Recover interrupted rides from the Arduino loop task, which has a larger
+// stack than the memory-constrained CYD UI task.
+void recoverStartupRides();
+
 // FreeRTOS task: polls touch, redraws at 1 Hz.
 void task(void* arg);
 

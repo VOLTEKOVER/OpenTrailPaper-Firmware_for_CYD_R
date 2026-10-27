@@ -929,12 +929,20 @@ void task(void*) {
                           (unsigned long)(d.passedCksum - prevGood),
                           (unsigned long)(d.failedCksum - prevBad),
                           (unsigned long)(sleepCalls - prevSleep));
+#ifdef BOARD_CYD
+                diag::log("gps UART state: rxmux=%08lx txmux=%08lx errors fifo=%lu buffer=%lu frame=%lu parity=%lu",
+                          (unsigned long)REG_READ(GPIO_PIN_MUX_REG[BOARD_GPS_RXD]),
+                          (unsigned long)REG_READ(GPIO_PIN_MUX_REG[BOARD_GPS_TXD]),
+                          (unsigned long)rxFifoErrors.load(), (unsigned long)rxBufferErrors.load(),
+                          (unsigned long)rxFrameErrors.load(), (unsigned long)rxParityErrors.load());
+#else
                 diag::log("gps UART state: clock=%08lx rxmux=%08lx txmux=%08lx errors fifo=%lu buffer=%lu frame=%lu parity=%lu",
                           (unsigned long)UART2.clk_conf.val,
                           (unsigned long)REG_READ(GPIO_PIN_MUX_REG[BOARD_GPS_RXD]),
                           (unsigned long)REG_READ(GPIO_PIN_MUX_REG[BOARD_GPS_TXD]),
                           (unsigned long)rxFifoErrors.load(), (unsigned long)rxBufferErrors.load(),
                           (unsigned long)rxFrameErrors.load(), (unsigned long)rxParityErrors.load());
+#endif
                 static bool rxSleepFallback = false;
                 uint32_t badDelta = d.failedCksum - prevBad;
                 uint32_t goodDelta = d.passedCksum - prevGood;

@@ -15,19 +15,24 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Compiled for the EPD_Painter device build and for the host preview harness.
-// The epdiy device build (env t5s3-pro) gets its drawing functions from epdiy
-// itself, so compiling ours there would be a duplicate definition of all
-// thirteen; its epdc_* panel shim lives in epd_compat_epdiy.cpp instead.
-#if !defined(ARDUINO) || defined(USE_EPD_PAINTER)
+// Compiled for EPD_Painter, CYD TFT and the host preview harness. The epdiy
+// device build (env t5s3-pro) gets its drawing functions from epdiy itself.
+#if !defined(ARDUINO) || defined(USE_EPD_PAINTER) || defined(BOARD_CYD)
 
 namespace {
 
 // Native panel geometry. The framebuffer is always in NATIVE orientation;
 // rotation is applied per-pixel on the way in, exactly as epdiy does, so our
 // layout code keeps working in rotated (540x960) coordinates.
+#ifdef BOARD_CYD
+constexpr int kNativeW = 240;
+constexpr int kNativeH = 320;
+constexpr int kLogicalW = 540;
+constexpr int kLogicalH = 960;
+#else
 constexpr int kNativeW = 960;
 constexpr int kNativeH = 540;
+#endif
 constexpr int kBytesPerRow = kNativeW / 2;   // 4bpp: 2 px per byte
 
 enum EpdRotation g_rotation = EPD_ROT_LANDSCAPE;
@@ -35,6 +40,11 @@ enum EpdRotation g_rotation = EPD_ROT_LANDSCAPE;
 // Rotate a rotated-space coordinate into native space. Must match epdiy's
 // _rotate() exactly or every screen shifts.
 inline bool rotateToNative(int x, int y, int& nx, int& ny) {
+#ifdef BOARD_CYD
+    if (x < 0 || x >= kLogicalW || y < 0 || y >= kLogicalH) return false;
+    nx = x * kNativeW / kLogicalW;
+    ny = y * kNativeH / kLogicalH;
+#else
     switch (g_rotation) {
         case EPD_ROT_LANDSCAPE:
             nx = x; ny = y;
@@ -52,6 +62,7 @@ inline bool rotateToNative(int x, int y, int& nx, int& ny) {
             nx = x; ny = y;
             break;
     }
+#endif
     return nx >= 0 && nx < kNativeW && ny >= 0 && ny < kNativeH;
 }
 
@@ -74,12 +85,20 @@ int epd_width()  { return kNativeW; }
 int epd_height() { return kNativeH; }
 
 int epd_rotated_display_width() {
+#ifdef BOARD_CYD
+    return kLogicalW;
+#else
     return (g_rotation == EPD_ROT_PORTRAIT || g_rotation == EPD_ROT_INVERTED_PORTRAIT)
                ? kNativeH : kNativeW;
+#endif
 }
 int epd_rotated_display_height() {
+#ifdef BOARD_CYD
+    return kLogicalH;
+#else
     return (g_rotation == EPD_ROT_PORTRAIT || g_rotation == EPD_ROT_INVERTED_PORTRAIT)
                ? kNativeW : kNativeH;
+#endif
 }
 
 void epd_set_rotation(enum EpdRotation rotation) { g_rotation = rotation; }
@@ -458,7 +477,10 @@ enum EpdDrawError epd_write_string(const EpdFont* font, const char* string,
 // numbers through their own captions twice already.
 int epdc_digit_height(const EpdFont* font) {
     const EpdGlyph* g = findGlyph(font, '0');
-    return g ? g->height : (font ? font->ascender : 0);
+    // A vector glyph can be unavailable when its raster allocation fails. Its
+    // zeroed bitmap height must not make the layout treat an oversized face as
+    // a perfect fit; use the face's ascent so the size ladder steps down.
+    return g && g->height ? g->height : (font ? font->ascender : 0);
 }
 
 EpdRect epd_get_string_rect(const EpdFont* font, const char* string, int x, int y,
@@ -485,7 +507,7 @@ EpdRect epd_get_string_rect(const EpdFont* font, const char* string, int x, int 
 //
 // Only compiled for the device. The host preview harness links the rasteriser
 // above and writes PNGs itself, so it must not pull in EPD_Painter or ESP-IDF.
-#ifdef ARDUINO
+#if defined(ARDUINO) && defined(USE_EPD_PAINTER) && !defined(BOARD_CYD)
 
 #include <Arduino.h>
 #include <Wire.h>

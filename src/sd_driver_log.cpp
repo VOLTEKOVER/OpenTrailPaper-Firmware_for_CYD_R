@@ -1,6 +1,12 @@
 #include <Arduino.h>
-#include <stdarg.h>
 #include "diag.h"
+#ifdef BOARD_CYD
+
+void diag::drainDriverLogs() {}
+
+#else
+
+#include <stdarg.h>
 #include "diag_buffer.h"
 
 namespace {
@@ -60,3 +66,5 @@ void diag::drainDriverLogs() {
         diag::log("driver: %s", line);
     }
 }
+
+#endif

@@ -2569,7 +2569,13 @@ void otaCommit() {
 
 void begin() {
     routeBuf = (char*)heap_caps_malloc(ROUTE_MAX, MALLOC_CAP_SPIRAM);
+#ifndef BOARD_CYD
     NimBLEDevice::setMTU(247);   // ask for a large MTU for fast transfers
+#else
+    // The CYD's classic ESP32 NimBLE port can assert on setMTU before its
+    // host mutex is ready; the default MTU remains sufficient for chunked I/O.
+    diag::log("ble: using default MTU on CYD");
+#endif
 
     // Fixed pairing: every app characteristic needs an authenticated (passkey,
     // Secure Connections, so bonded) link, and so does every CCCD — set before

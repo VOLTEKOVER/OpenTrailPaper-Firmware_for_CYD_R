@@ -461,7 +461,9 @@ struct SdProbe {
 SdProbe sdSpiForceIdle() {
     SdProbe probe;
     SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+#ifndef BOARD_CYD
     digitalWrite(BOARD_LORA_CS, HIGH);
+#endif
     digitalWrite(BOARD_SD_CS, HIGH);
     for (int i = 0; i < 10; ++i) SPI.transfer(0xFF);
     digitalWrite(BOARD_SD_CS, LOW);
@@ -575,16 +577,23 @@ bool mountLocked(bool logFailures) {
 bool begin() {
     sdLock();
     // SD and LoRa share the SPI bus; a floating LoRa CS corrupts SD traffic.
+#ifndef BOARD_CYD
     pinMode(BOARD_LORA_CS, OUTPUT);
     digitalWrite(BOARD_LORA_CS, HIGH);
+#endif
     pinMode(BOARD_SD_CS, OUTPUT);
     digitalWrite(BOARD_SD_CS, HIGH);
 
     // Keep the chip selects driven in automatic light sleep. Do not latch
     // them with gpio_hold here: normal SPI traffic must still toggle CS.
     gpio_sleep_sel_dis((gpio_num_t)BOARD_SD_CS);
+#ifndef BOARD_CYD
     gpio_sleep_sel_dis((gpio_num_t)BOARD_LORA_CS);
+#endif
     SPI.begin(BOARD_SPI_SCLK, BOARD_SPI_MISO, BOARD_SPI_MOSI);
+#ifdef BOARD_CYD
+    diag::log("sd: free heap before mount=%u bytes", ESP.getFreeHeap());
+#endif
     sdOk = mountLocked(true);
     if (sdOk && !SD.exists(RIDE_DIR)) SD.mkdir(RIDE_DIR);
     sdUnlock();

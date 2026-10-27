@@ -16,8 +16,11 @@ Preferences prefs;
 float compassOff = NAN;
 int ftp = FTP_WATTS;
 int tz = TIMEZONE_OFFSET_MINUTES;
-int bl = 0;  // backlight level 0-3; OFF until the rider turns it on — e-paper
-             // needs no light in daylight, and a lit panel drains a fresh device
+#ifdef BOARD_CYD
+int bl = 2;
+#else
+int bl = 0;
+#endif
 bool miles = false;  // false = km, true = miles
 bool clk24 = true;   // true = 24-hour clock, false = 12-hour
 bool usbDrv = true;  // true = expose SD as USB drive when plugged into a host
@@ -75,7 +78,7 @@ void begin() {
     compassOff = prefs.getFloat("cmpoff", NAN);
     ftp = prefs.getInt("ftp", FTP_WATTS);
     tz = prefs.getInt("tz", TIMEZONE_OFFSET_MINUTES);
-    bl = prefs.getInt("bl", 0);
+    bl = prefs.getInt("bl", bl);
     miles = prefs.getBool("miles", false);
     clk24 = prefs.getBool("clk24", true);
     // Key bumped to usbdrv2 so the new OFF default takes effect even on devices

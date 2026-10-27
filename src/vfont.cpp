@@ -16,8 +16,13 @@
 
 #if defined(ESP_PLATFORM)
 #include "esp_heap_caps.h"
+#if defined(BOARD_CYD)
+static void* vfAlloc(size_t n) { return heap_caps_malloc(n, MALLOC_CAP_8BIT); }
+static void* vfRealloc(void* p, size_t n) { return heap_caps_realloc(p, n, MALLOC_CAP_8BIT); }
+#else
 static void* vfAlloc(size_t n) { return heap_caps_malloc(n, MALLOC_CAP_SPIRAM); }
 static void* vfRealloc(void* p, size_t n) { return heap_caps_realloc(p, n, MALLOC_CAP_SPIRAM); }
+#endif
 #else
 static void* vfAlloc(size_t n) { return malloc(n); }
 static void* vfRealloc(void* p, size_t n) { return realloc(p, n); }
@@ -221,7 +226,12 @@ bool renderGlyph(Face& face, uint32_t gi) {
     const int gw = ix1 - ix0 + 1, gh = iy1 - iy0 + 1;
     const size_t bytes = (size_t)((gw + 1) / 2) * gh;
     if (face.used + bytes > face.cap) {
-        size_t ncap = face.cap ? face.cap * 2 : 8192;
+#if defined(BOARD_CYD)
+        constexpr size_t kInitialArenaCapacity = 1024;
+#else
+        constexpr size_t kInitialArenaCapacity = 8192;
+#endif
+        size_t ncap = face.cap ? face.cap * 2 : kInitialArenaCapacity;
         while (ncap < face.used + bytes) ncap *= 2;
         uint8_t* na = (uint8_t*)vfRealloc(face.arena, ncap);
         if (!na) { vfFree(cov); return false; }
@@ -296,6 +306,13 @@ const EpdFont* vf_face(const VfFont* font, float emPx) {
 
 const EpdFont* vf_face_digit(const VfFont* font, int digitPx) {
     if (!font) return nullptr;
+#if defined(BOARD_CYD)
+    // The CYD has no PSRAM. Rasterising large vector glyphs needs a temporary
+    // float coverage buffer proportional to glyph area, which can exceed its
+    // remaining internal heap after BLE and UI tasks have started.
+    constexpr int kMaxCydDigitPx = 64;
+    if (digitPx > kMaxCydDigitPx) digitPx = kMaxCydDigitPx;
+#endif
     const int dh = font->digitTop - font->digitBottom;
     if (dh <= 0) return vf_face(font, (float)digitPx);
     return vf_face(font, (float)digitPx * (float)font->unitsPerEm / (float)dh);

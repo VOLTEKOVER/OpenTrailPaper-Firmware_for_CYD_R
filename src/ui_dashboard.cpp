@@ -1,12 +1,18 @@
 #include "ui_dashboard.h"
 
 #include <Arduino.h>
+#include <atomic>
 #include <stdarg.h>
 #include <SD.h>
 #include <Update.h>
+#include <SPI.h>
 #include <Wire.h>
 #include "epd_compat.h"
+#ifdef BOARD_CYD
+#include <XPT2046_Touchscreen.h>
+#else
 #include <TouchDrvGT911.hpp>
+#endif
 
 #include "config.h"
 #include "ride_state.h"
@@ -17,7 +23,9 @@
 #include "board_power.h"
 #include <esp_sleep.h>
 #include <esp_system.h>
+#ifndef BOARD_CYD
 #include <esp32-hal-tinyusb.h>   // usb_persist_restart / RESTART_BOOTLOADER
+#endif
 #include <driver/gpio.h>
 #include <driver/rtc_io.h>
 #include "ui_render.h"
@@ -50,7 +58,13 @@
 
 namespace {
 
+#ifdef BOARD_CYD
+// Poll the XPT2046 directly instead of depending on its IRQ line. Some CYD
+// revisions do not expose a reliable touch interrupt on GPIO36.
+XPT2046_Touchscreen touch(BOARD_TOUCH_CS);
+#else
 TouchDrvGT911 touch;
+#endif
 bool touchOk = false;
 int refreshCount = 0;
 
@@ -165,6 +179,38 @@ volatile bool boardBtnIrq = false;   // BOOT edge or expander INT (GPIO38)
 // waits — and this task does both SD reads and panel painting. An input
 // interrupt landing mid-transfer would corrupt a driver's completion handshake.
 SemaphoreHandle_t uiWake = nullptr;
+
+#ifdef BOARD_CYD
+int16_t mapTouchAxis(int16_t raw, int rawMin, int rawMax, int screenMax) {
+    if (raw < rawMin) raw = rawMin;
+    if (raw > rawMax) raw = rawMax;
+    return (int16_t)((int32_t)(raw - rawMin) * screenMax / (rawMax - rawMin));
+}
+
+void touchBusRestoreSdPins() {
+    SPI.end();
+    SPI.begin(BOARD_SPI_SCLK, BOARD_SPI_MISO, BOARD_SPI_MOSI);
+}
+
+TS_Point readCydTouchPoint() {
+    sdLock();
+    SPI.end();
+    SPI.begin(BOARD_TOUCH_SCLK, BOARD_TOUCH_MISO, BOARD_TOUCH_MOSI);
+    TS_Point point = touch.getPoint();
+    touchBusRestoreSdPins();
+    sdUnlock();
+    return point;
+}
+
+void mapCydTouchToUi(const TS_Point& point, int16_t& x, int16_t& y) {
+    const int16_t px = mapTouchAxis(point.x, BOARD_TOUCH_RAW_X_MIN,
+                                    BOARD_TOUCH_RAW_X_MAX, 239);
+    const int16_t py = mapTouchAxis(point.y, BOARD_TOUCH_RAW_Y_MIN,
+                                    BOARD_TOUCH_RAW_Y_MAX, 319);
+    x = (int16_t)((int32_t)px * epd_rotated_display_width() / 240);
+    y = (int16_t)((int32_t)py * epd_rotated_display_height() / 320);
+}
+#endif
 
 // Idle block length. 200 ms is the loop's own touch-poll backstop, so nothing
 // inside it is starved; input latency is unaffected because the ISRs release
@@ -366,11 +412,17 @@ void shutdownDevice(uint8_t* fb, const char* reason) {
     // above keeps LoRa SPI quiet across the cut. Evidence: the expander's
     // port-0 output/config bits, the battery current before and after, and
     // whether the GPS is still talking on RX afterwards.
+#ifndef BOARD_CYD
     radioRailOffProbe();
     diag::log("sleep: final SD flush; mounted=%d host=%d CS=%d/%d bl=%d",
               ride_recorder::sdMounted(), usb_storage::hostActive(),
               digitalRead(BOARD_SD_CS), digitalRead(BOARD_LORA_CS),
               digitalRead(BOARD_BL_EN));
+#else
+    diag::log("sleep: final SD flush; mounted=%d host=%d CS=%d bl=%d",
+              ride_recorder::sdMounted(), usb_storage::hostActive(),
+              digitalRead(BOARD_SD_CS), digitalRead(BOARD_BL_EN));
+#endif
     diag::flushToSD();
     diag::checkpoint("entering deep sleep");
     diag::storageStage(6);
@@ -378,14 +430,18 @@ void shutdownDevice(uint8_t* fb, const char* reason) {
     diag::drainDriverLogs();
     diag::checkpoint("SD unmount diagnostics");
     digitalWrite(BOARD_SD_CS, HIGH);
+#ifndef BOARD_CYD
     digitalWrite(BOARD_LORA_CS, HIGH);
+#endif
     gpio_hold_en((gpio_num_t)BOARD_SD_CS);
     // sdUnlock intentionally omitted: no bus work may begin before CPU stops.
 
     // Peripherals down, matching the factory sleep sequence
+#ifndef BOARD_CYD
     i2cLock(); touch.sleep(); i2cUnlock();
     digitalWrite(BOARD_TOUCH_RST, LOW);
     gpio_hold_en((gpio_num_t)BOARD_TOUCH_RST);
+#endif
     gpio_deep_sleep_hold_en();
     board_radio_power(false);
     // With the GPS + LoRa rail cut, nothing facing it may stay high: the
@@ -395,14 +451,22 @@ void shutdownDevice(uint8_t* fb, const char* reason) {
     // Outputs go low; inputs from the radios get pulled down rather than left
     // floating. MOSI/SCLK/MISO are shared with the SD card, and low is safe for
     // it too; SD CS stays high.
+#ifdef BOARD_CYD
+    for (int p : {BOARD_GPS_TXD, BOARD_SPI_MOSI, BOARD_SPI_SCLK}) {
+#else
     for (int p : {BOARD_GPS_TXD, BOARD_LORA_CS, BOARD_LORA_RST,
                   BOARD_SPI_MOSI, BOARD_SPI_SCLK}) {
+#endif
         gpio_reset_pin((gpio_num_t)p);
         gpio_pullup_dis((gpio_num_t)p);
         gpio_set_direction((gpio_num_t)p, GPIO_MODE_OUTPUT);
         gpio_set_level((gpio_num_t)p, 0);
     }
+#ifdef BOARD_CYD
+    for (int p : {BOARD_GPS_RXD, BOARD_SPI_MISO}) {
+#else
     for (int p : {BOARD_GPS_RXD, BOARD_LORA_IRQ, BOARD_LORA_BUSY, BOARD_SPI_MISO}) {
+#endif
         gpio_reset_pin((gpio_num_t)p);
         gpio_pullup_dis((gpio_num_t)p);
         gpio_pulldown_en((gpio_num_t)p);
@@ -1236,20 +1300,29 @@ void buildMapScreenData(const RideState& s, MapScreenData& map,
                           /*cachedOnly=*/finalFrame ? false : !mapFullPass);
     map.hasMap = map_store::coversPosition(lat, lon);
 
-    if (routes::active() && routeScreenPts) {
-        int n = routes::pointCount();
-        if (n > MAX_ROUTE_SCREEN_PTS) n = MAX_ROUTE_SCREEN_PTS;
-        for (int i = 0; i < n; ++i) {
-            double plat, plon;
-            routes::point(i, plat, plon);
-            map_tiles::geoToScreen(plat, plon, lat, lon, mapMpp, map.riderX,
-                                   map.riderY, rot, routeScreenPts[i * 2],
-                                   routeScreenPts[i * 2 + 1]);
+    if (routes::active()) {
+        if (!routeScreenPts) {
+#ifdef BOARD_CYD
+            routeScreenPts = (int16_t*)heap_caps_malloc(
+                MAX_ROUTE_SCREEN_PTS * 2 * sizeof(int16_t), MALLOC_CAP_8BIT);
+#endif
         }
-        map.route = routeScreenPts;
-        map.routePointCount = n;
-        map.riddenPointCount = routes::progressIndex() + 1;
-        map.showRemaining = true;
+        if (routeScreenPts) {
+            int n = routes::pointCount();
+            if (n > MAX_ROUTE_SCREEN_PTS) n = MAX_ROUTE_SCREEN_PTS;
+            for (int i = 0; i < n; ++i) {
+                double plat, plon;
+                routes::point(i, plat, plon);
+                map_tiles::geoToScreen(plat, plon, lat, lon, mapMpp,
+                                       map.riderX, map.riderY, rot,
+                                       routeScreenPts[i * 2],
+                                       routeScreenPts[i * 2 + 1]);
+            }
+            map.route = routeScreenPts;
+            map.routePointCount = n;
+            map.riddenPointCount = routes::progressIndex() + 1;
+            map.showRemaining = true;
+        }
         map.remainingKm = routes::remainingKm();
     }
 }
@@ -1614,6 +1687,7 @@ uint32_t    bootMs[16];
 char        bootPending[28] = "";
 int         bootCount = 0;
 bool        bootScreenLive = false;
+std::atomic<bool> startupRecoveryComplete{false};
 }
 
 // Panel-only bring-up, split out of begin() so setup() can show progress while
@@ -1637,14 +1711,25 @@ bool beginPanel() {
     // Deep-sleep shutdown latches the touch RST pin LOW (gpio_hold) to keep
     // the GT911 in reset. Release that hold on boot, or after a wake the
     // controller stays reset and touch never works (can't reach map/settings).
+#ifndef BOARD_CYD
     gpio_hold_dis((gpio_num_t)BOARD_TOUCH_RST);
+#endif
     gpio_deep_sleep_hold_dis();
 
     EPDC_STEP("backlight");
 
+#ifndef BOARD_CYD
     touch.setPins(BOARD_TOUCH_RST, BOARD_TOUCH_INT);
     touchOk = touch.begin(Wire, GT911_SLAVE_ADDRESS_L, BOARD_SDA, BOARD_SCL);
     if (!touchOk) Serial.println("[ui] GT911 touch not found");
+#else
+    // Keep the shared Arduino SPI singleton on the SD wiring by default.
+    // readCydTouchPoint() switches it to the XPT2046 pins only for each read.
+    SPI.begin(BOARD_SPI_SCLK, BOARD_SPI_MISO, BOARD_SPI_MOSI);
+    touchOk = touch.begin();
+    touch.setRotation(1);  // preserve raw axes for the calibrated portrait mapping
+    if (!touchOk) Serial.println("[ui] XPT2046 touch init failed");
+#endif
 
     EPDC_STEP("touch");
 
@@ -1655,8 +1740,9 @@ bool beginPanel() {
     // blocks on it immediately).
     uiWake = xSemaphoreCreateBinary();
 
-    attachInterrupt(digitalPinToInterrupt(BOARD_TOUCH_INT), onTouchIrq, FALLING);
     attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_BTN), onBoardBtnIrq, CHANGE);
+#ifndef BOARD_CYD
+    attachInterrupt(digitalPinToInterrupt(BOARD_TOUCH_INT), onTouchIrq, FALLING);
     pinMode(BOARD_PCA9535_INT, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(BOARD_PCA9535_INT), onBoardBtnIrq,
                     FALLING);
@@ -1664,6 +1750,7 @@ bool beginPanel() {
     // The capacitive Home button below the display is a GT911 key, reported
     // via this callback during touch.getPoint(). It navigates back.
     touch.setHomeButtonCallback([](void*) { homeKeyPressed = true; }, nullptr);
+#endif
 
     // Scrub before the first paint. E-paper holds its image with no power, so
     // what is physically on the glass right now is the shutdown screen from the
@@ -1674,10 +1761,11 @@ bool beginPanel() {
     EPDC_STEP("cleared");
 
     fbSize = epd_width() / 2 * epd_height();
+#ifndef BOARD_CYD
     shadowFb = (uint8_t*)heap_caps_malloc(fbSize, MALLOC_CAP_SPIRAM);
-
     routeScreenPts = (int16_t*)heap_caps_malloc(
         MAX_ROUTE_SCREEN_PTS * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+#endif
 
     EPDC_STEP("buffers");
     bootScreenLive = true;
@@ -1818,10 +1906,15 @@ bool begin() {
     bootStatus("Maps", true);
     EPDC_STEP("bootStatus done");
     EPDC_STEP("map loaded — begin() done");
-    // Hand the panel over to the dashboard: further bootStatus() calls no-op,
-    // and the task's first refresh() paints the real UI over the boot screen.
-    bootScreenLive = false;
+    // Keep the boot log on screen until the dashboard task actually starts;
+    // setup() may still fail to allocate that task when internal RAM is tight.
     return true;
+}
+
+void recoverStartupRides() {
+    ride_recorder::recoverRides();
+    startupRecoveryComplete.store(true, std::memory_order_release);
+    if (uiWake) xSemaphoreGive(uiWake);
 }
 
 // Flash a firmware.bin dropped on the SD card, then reboot. Reads straight from
@@ -1859,7 +1952,7 @@ void applySdUpdate() {
 
     bool ok = false;
     if (Update.begin(size)) {
-        uint8_t buf[4096];
+        static uint8_t buf[4096];
         size_t written = 0;
         int lastPct = -10;
         while (written < size) {
@@ -1900,10 +1993,14 @@ void applySdUpdate() {
 // so the host can reset us back into the app afterwards with no button press.
 // tools/flash.py drives both halves; `pio run -t upload` goes through it.
 static void rebootToBootloader() {
+#ifdef BOARD_CYD
+    diag::log("bootloader: use the CYD BOOT and RESET buttons to enter download mode");
+#else
     Serial.println("[cmd] entering download mode — flash now");
     Serial.flush();
     delay(100);
     usb_persist_restart(RESTART_BOOTLOADER);
+#endif
 }
 
 // After an `agnss <n>` command, the next n bytes on the console are raw AGNSS
@@ -2686,6 +2783,10 @@ void pollSerialCommands() {
 }
 
 void task(void*) {
+    bootScreenLive = false;
+    forceDraw = true;
+    diag::log("ui: dashboard task started");
+
     uint32_t lastDraw = 0;
     Screen lastScreen = screen;
     bool lastOverlay = false;
@@ -2694,19 +2795,9 @@ void task(void*) {
     lastActivityMs = millis();
     int lastUpdatePct = -100, lastUpdatePhase = -1;
 
-    // Ride recovery runs HERE, not in setup(). It is unbounded card work — it
-    // once ran long enough to trip the interrupt watchdog, and since a reset
-    // mid-recovery tears another file, every reboot found more to do than the
-    // last. Off the boot path a slow recovery costs time, not a brick.
-    ride_recorder::recoverRides();
-    // A ride the reset cut short: put the question on screen before anything
-    // else happens to the file.
-    if (ride_recorder::pendingRecovery(&pendingSummary)) {
-        recoveryPrompt = true;
-        screen = SCREEN_SUMMARY;
-    }
-    applySdUpdate();          // flash a firmware.bin from the SD card, if present
-    usb_storage::begin();     // THEN expose the SD to a host computer over USB
+    // The Arduino loop task performs FIT recovery on its larger stack. Do not
+    // access the card for updates or hand it to USB until that recovery ends.
+    bool startupStoragePending = true;
     bool lastHostActive = false;
 
     for (;;) {
@@ -2914,12 +3005,19 @@ void task(void*) {
             }
         }
 
-        // Touch: interrupt-driven. getPoint() (an I2C read) runs when the
-        // GT911 INT fired, while a touch is ongoing (to catch the release),
-        // or on a slow fallback tick so input is never dropped.
+        // GT911 input is interrupt-driven; the CYD resistive controller is
+        // polled because its shared SPI bus also serves the SD card.
         if (touchOk) {
             static int16_t lastX = 0, lastY = 0;
             static uint32_t lastTouchPoll = 0;
+#ifdef BOARD_CYD
+            constexpr uint32_t kTouchPollMs = 30;
+            if (touchWasDown || millis() - lastTouchPoll > kTouchPollMs) {
+                lastTouchPoll = millis();
+                TS_Point point = readCydTouchPoint();
+                bool down = point.z >= 400;
+                if (down) mapCydTouchToUi(point, lastX, lastY);
+#else
             if (touchIrq || touchWasDown || millis() - lastTouchPoll > 200) {
                 touchIrq = false;
                 lastTouchPoll = millis();
@@ -2931,6 +3029,7 @@ void task(void*) {
                     lastX = x[0];
                     lastY = y[0];
                 }
+#endif
                 static uint32_t lastTapMs = 0;
                 if (down && !touchWasDown) {
                     touchDownAt = millis();
@@ -3398,6 +3497,20 @@ void task(void*) {
                     navPromptAppearing,
                     mapTransition || tonedTransition || dashPageFlip ||
                         bandCleared);
+        }
+
+        if (startupStoragePending) {
+            if (startupRecoveryComplete.load(std::memory_order_acquire)) {
+                startupStoragePending = false;
+                if (ride_recorder::pendingRecovery(&pendingSummary)) {
+                    recoveryPrompt = true;
+                    screen = SCREEN_SUMMARY;
+                    forceDraw = true;
+                }
+                diag::log("ui: ride recovery complete; checking SD update");
+                applySdUpdate();  // flash firmware.bin before exposing the card
+                usb_storage::begin();
+            }
         }
 
         // The epdiy path managed panel rails by hand here — poweron before an

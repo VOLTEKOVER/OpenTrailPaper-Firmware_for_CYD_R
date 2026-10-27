@@ -1,7 +1,7 @@
 #pragma once
 
-// Drop-in replacement for the drawing half of epdiy, so the panel can be driven
-// by EPD_Painter instead.
+// Drop-in software replacement for the drawing half of epdiy. Panel output is
+// supplied by EPD_Painter on T5S3 and TFT_eSPI on CYD.
 //
 // WHY THIS EXISTS
 // epdiy and EPD_Painter cannot coexist: epd_renderer_init() asserts a non-NULL
@@ -16,10 +16,8 @@
 // working. Only the panel layer in ui_dashboard.cpp changes.
 //
 // The framebuffer stays in epdiy's exact 4bpp format — 2 pixels per byte, low
-// nibble = even x, 0x0 black .. 0xF white, 480 bytes per native row. Keeping
-// that format is what makes the renderers portable; conversion to
-// EPD_Painter's 8bpp level buffer happens once, at paint time (see
-// epdc_paint()), not throughout the drawing code.
+// nibble = even x, 0x0 black .. 0xF white. On CYD, the legacy portrait
+// 540x960 logical canvas is rasterized into a physical 240x320 framebuffer.
 //
 // Implementations here are written from scratch (Bresenham, scanline fills,
 // glyph blitting) rather than copied from epdiy, which is LGPL-3.0 while this
@@ -33,18 +31,15 @@
 // Panel layer (the part that replaces epd_hl_* / epd_init / epd_poweron)
 // ---------------------------------------------------------------------------
 
-// Bring up EPD_Painter and allocate the 4bpp framebuffer plus the 8bpp level
-// buffer paint() consumes. Returns false if either allocation or the driver
-// fails. Sets the rotation our UI is laid out for.
+// Bring up the selected panel backend and allocate its framebuffer. Returns
+// false if allocation or driver initialization fails.
 bool epdc_begin();
 
 // The 4bpp framebuffer the renderers draw into. Stable for the process
 // lifetime; never freed.
 uint8_t* epdc_framebuffer();
 
-// Push the framebuffer to the panel. Converts 4bpp -> EPD_Painter levels and
-// calls paint(), whose own delta engine drives only what changed — so there is
-// no need for the dirty-rect bookkeeping the epdiy path required.
+// Push the framebuffer to the panel.
 void epdc_paint();
 
 // Block until the panel has actually finished being driven.

@@ -1,5 +1,29 @@
 #include "usb_storage.h"
 
+#ifdef BOARD_CYD
+
+#include <Arduino.h>
+#include "diag.h"
+
+namespace usb_storage {
+
+void begin() {
+    static bool logged = false;
+    if (!logged) {
+        diag::log("usb storage: MSC unavailable on classic ESP32");
+        logged = true;
+    }
+}
+
+void setDriveEnabled(bool) {}
+bool driveEnabled() { return false; }
+bool hostActive() { return false; }
+void poll() {}
+
+}  // namespace usb_storage
+
+#else
+
 #include <Arduino.h>
 #include <SD.h>
 #include "USB.h"
@@ -192,3 +216,5 @@ void poll() {
 }
 
 }  // namespace usb_storage
+
+#endif

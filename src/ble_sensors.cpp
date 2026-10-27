@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <esp_heap_caps.h>
 
 #include "ride_state.h"
 #include "settings.h"
@@ -665,9 +666,35 @@ bool connectSensor(SensorKind kind) {
 
 namespace ble_sensors {
 
-void begin() {
+namespace {
+bool stackReady = false;
+}
+
+bool begin() {
     candMutex = xSemaphoreCreateMutex();
-    NimBLEDevice::init("OpenTrailPaper");
+    if (!candMutex) {
+        diag::log("ble sensors: candidate mutex allocation failed");
+        return false;
+    }
+    const unsigned freeBefore =
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const unsigned largestBefore =
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+#ifdef BOARD_CYD
+    NimBLEDevice::setScanDuplicateCacheSize(10);
+#endif
+    const bool initOk = NimBLEDevice::init("OpenTrailPaper");
+    const bool initialized = NimBLEDevice::isInitialized();
+    diag::log("ble sensors: NimBLE init=%d initialized=%d internal=%u largest=%u",
+              initOk, initialized,
+              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    if (!initOk || !initialized) {
+        diag::log("ble sensors: NimBLE startup failed (before internal=%u largest=%u)",
+                  freeBefore, largestBefore);
+        return false;
+    }
+    stackReady = true;
     // Bond with the phone (Secure Connections). The iPhone's own Apple Media
     // Service only talks over an encrypted link, so the AMS client
     // (ams_client.cpp) needs the pairing; bonds persist in NVS, so pairing
@@ -684,6 +711,7 @@ void begin() {
     // still finds sensors within a few seconds.
     scan->setInterval(160);
     scan->setWindow(48);
+    return true;
 }
 
 void task(void*) {
@@ -856,7 +884,7 @@ void setScanAlways(bool on) { scanAlways = on; }
 
 void holdScan(bool on) {
     scanHeld = on;
-    if (on) {
+    if (on && stackReady) {
         NimBLEScan* scan = NimBLEDevice::getScan();
         if (scan->isScanning()) scan->stop();
     }
@@ -921,6 +949,7 @@ void links(Link* out) {
 }
 
 bool disconnect(int kind) {
+    if (!stackReady) return false;
     if (kind < 0 || kind >= KIND_COUNT) return false;
     if (!sensors[kind].connected || !sensors[kind].client) return false;
     // connected/found are cleared by ClientCallbacks::onDisconnect, which also

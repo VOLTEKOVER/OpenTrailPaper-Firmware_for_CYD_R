@@ -8,12 +8,12 @@
 // whole point of this experiment. So the feature is stubbed rather than ported;
 // if the M2 per-pixel state machine is ever revisited it belongs inside the
 // driver, not alongside it.
-#ifdef USE_EPD_PAINTER
+#if defined(USE_EPD_PAINTER) || defined(BOARD_CYD)
 
 #include "diag.h"
 
 namespace smooth_epd {
-void selfTest() { diag::log("smooth: unavailable on the EPD_Painter driver"); }
+void selfTest() { diag::log("smooth: unavailable without the e-paper driver"); }
 }  // namespace smooth_epd
 
 #else
@@ -111,4 +111,4 @@ void selfTest() {
 
 }  // namespace smooth_epd
 
-#endif  // USE_EPD_PAINTER
+#endif  // USE_EPD_PAINTER || BOARD_CYD

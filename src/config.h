@@ -1,12 +1,18 @@
 #pragma once
 
-// Pin map for LilyGO T5S3 4.7" e-paper PRO (from LilyGO's factory firmware
-// utilities.h). The e-paper data bus is handled internally by epdiy's
-// epd_board_v7 definition and does not appear here.
+// Board pin map. The CYD entries cover the external GPS, SD card, and TFT
+// connections; the remaining firmware still expects T5S3-only hardware.
 
 // GPS (u-blox MIA-M10Q or L76K, autodetected at runtime)
+#ifdef BOARD_CYD
+// UART2 pins for an external GPS. GPIO21 is reserved for the CYD backlight.
+#define BOARD_GPS_RXD       22
+#define BOARD_GPS_TXD       27
+#else
+// LilyGO T5S3 (from LilyGO's factory firmware utilities.h)
 #define BOARD_GPS_RXD       44
 #define BOARD_GPS_TXD       43
+#endif
 
 // GPS acquisition telemetry over USB serial, for iterating on first-fix time.
 // Prints a 1 Hz status line while searching (sats, SNR, DOP, fix type, aiding,
@@ -25,11 +31,31 @@
 #define BOARD_TOUCH_INT     3
 #define BOARD_TOUCH_RST     9
 
-// SD card (shared SPI bus with LoRa)
+#ifdef BOARD_CYD
+#define BOARD_TOUCH_CS      33
+#define BOARD_TOUCH_IRQ     36
+#define BOARD_TOUCH_SCLK    25
+#define BOARD_TOUCH_MISO    39
+#define BOARD_TOUCH_MOSI    32
+#define BOARD_TOUCH_RAW_X_MIN 200
+#define BOARD_TOUCH_RAW_X_MAX 3800
+#define BOARD_TOUCH_RAW_Y_MIN 250
+#define BOARD_TOUCH_RAW_Y_MAX 3880
+#endif
+
+// SD card
+#ifdef BOARD_CYD
+#define BOARD_SPI_MISO      19
+#define BOARD_SPI_MOSI      23
+#define BOARD_SPI_SCLK      18
+#define BOARD_SD_CS         5
+#else
+// T5S3 SD card (shared SPI bus with LoRa)
 #define BOARD_SPI_MISO      21
 #define BOARD_SPI_MOSI      13
 #define BOARD_SPI_SCLK      14
 #define BOARD_SD_CS         12
+#endif
 #define BOARD_LORA_CS       46
 // SX1262 control lines (the data path is the shared SPI bus above). Every radio
 // SPI transaction must be wrapped in sdLock()/sdUnlock() — see sd_bus.h; a LoRa
@@ -44,8 +70,18 @@
 #define BOARD_PCA9535_INT   38
 #define BOARD_BOOT_BTN      0
 
-// Backlight: PT4103 driver enabled by GPIO11 (PWM brightness).
+// Backlight
+#ifdef BOARD_CYD
+#define BOARD_BL_EN         21
+#define BOARD_TFT_MOSI      13
+#define BOARD_TFT_SCLK      14
+#define BOARD_TFT_CS        15
+#define BOARD_TFT_DC        2
+#define BOARD_TFT_RST       -1
+#else
+// T5S3 backlight: PT4103 driver enabled by GPIO11 (PWM brightness).
 #define BOARD_BL_EN         11
+#endif
 // Front button on GPIO48 (free — epdiy drives the panel CKV via the LCD
 // peripheral, not this pin). Cycles the backlight brightness.
 #define BOARD_BL_BTN        48
@@ -55,8 +91,8 @@
 // Side button: expander PC12 (pin 10), pressed = LOW
 #define IOEXP_PIN_SIDE_BUTTON 10
 
-// Display orientation: 540x960 portrait, matching the factory firmware
-// (touch coords map 1:1 in this rotation). Use EPD_ROT_PORTRAIT to flip 180°.
+// UI logical orientation: 540x960 portrait. CYD scales this canvas to the
+// physical 240x320 portrait TFT; other panels use their native orientation.
 #define DISPLAY_ROTATION    EPD_ROT_INVERTED_PORTRAIT
 
 // Full (ghost-clearing) refresh every N fast refreshes.

@@ -76,8 +76,13 @@ void ditherMaskReset() {
 // map band [MAP_TOP, MAP_BOTTOM) so the status bar/footer never flash.
 inline void ditherMaskMark(int x, int y) {
     if (!s_ditherMask || y < MAP_TOP || y >= MAP_BOTTOM) return;
+#ifdef BOARD_CYD
+    int nx = x * epd_width() / epd_rotated_display_width();
+    int ny = y * epd_height() / epd_rotated_display_height();
+#else
     // INVERTED_PORTRAIT: native_x = app_y, native_y = epd_height()-1 - app_x.
     int nx = y, ny = epd_height() - 1 - x;
+#endif
     if (nx < 0 || nx >= epd_width() || ny < 0 || ny >= epd_height()) return;
     s_ditherMask[(size_t)ny * (epd_width() / 2) + (nx >> 1)] = 1;
 }

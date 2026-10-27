@@ -4,6 +4,7 @@
 // 540x960 portrait, pure black on white, heavy condensed numerals in
 // bordered cells, tracked uppercase labels, static chrome.
 //
+// CYD maps this logical portrait canvas to its physical 240x320 TFT.
 // epdiy framebuffer in, pixels out. No hardware, no tasks — compiled
 // on-device AND on the host (tools/preview) for pixel-identical PNGs.
 
